@@ -1,0 +1,1109 @@
+---
+title: "Mechanistic temperature-size rule explanation should reconcile physiological and mortality responses to temperature "
+author: "Shane A. Richards and Asta Audzijonyte"
+date: "29/03/2022"
+output:
+  html_document:
+    highlight: tango
+    theme: cerulean
+    toc: yes
+    toc_float: no
+  word_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls()) # clear memory
+
+library(tidyverse)
+library(tibble)
+library(ggplot2)
+library(cowplot)
+library(tidyr)
+```
+
+# Useful functions
+
+```{r}
+# Reserve:Structure ratio 
+RSRatio <- function(age) {
+  tmp <- rs1*(age-a_bar)
+  tmp <- max(tmp, -20) # bound below
+  tmp <- min(tmp,  20) # bound above
+
+  return(rs_min + (rs_max - rs_min)*exp(tmp) / (1.0 + exp(tmp)))
+} 
+
+# Predator length [m]
+predatorLength <- function(S) {
+  return((S/l_const)^(1/3.0)) # assumes invariant growth
+} 
+
+# Mortality rate [d-1]
+mortProb <- function(l) {
+  m_rate <- m_min + (m_max-m_min)*exp(-m1*l) # instantaneous mortality rate
+  return(1.0 - exp(-m_rate)) # probability die per day
+} 
+
+# intake rate [d d-1] 
+# Egle - extended to include temperature
+grossIntake <- function(S) {
+  Eiscalar <- exp((-Ei/k)*(1/Temp-1/Tref))
+  
+  return((g0*S^g1)*Eiscalar*S^(ci*(Temp-Tref)))
+}
+
+# DEB maintenance version [g d-1 g-1]
+# Egle - extended to include temperature
+maintenance <- function(S, R) {
+  Emscalar <- exp((-Em/k)*(1/Temp-1/Tref))
+  
+  # return((ms*S + mr*w*R)*Emscalar*(S+R)^(cm*(Temp-Tref)))
+  return((ms*S + mr*R)*Emscalar*(S+R)^(cm*(Temp-Tref)))
+}
+
+# Energetic reproductive cost
+reproCost <- function(S) {
+  return(ra*S^rb)
+}
+
+# scaling factor
+phi <- function(Temp, Tref, m, x) {
+  if (x == "I") { # Intake
+    Eiscalar <- exp((-Ei/k)*(1/Temp-1/Tref))
+    Val      <- Eiscalar * m^(ci*(Temp - Tref))
+  } else { # Maintenance
+    Emscalar <- exp((-Em/k)*(1/Temp-1/Tref))
+    Val      <- Emscalar * m^(cm*(Temp - Tref))
+  }
+  
+  return(Val)
+}
+```
+
+# Model parameters for baseline scenario
+
+```{r message=FALSE, warning=FALSE}
+# Model parameters for the baseline zero fishing scenario 
+max_age_years <- 20      # years of simulation
+max_age_days  <- 365*max_age_years # (d)
+
+rs_max  <- 1.3           # maximum RS ratio
+rs_min  <- 0.0           # minimum RS ratio
+
+# length-weight conversion: 
+l_const <- 1250/(0.60^3) # (g m-1) num = weight (g), denom = length (m)
+# length-weight conversion uses weight of S only and assumes that 
+# 1250g of S weight (ca 3000g of total) corresponds to 60cm long fish
+
+g0      <- 0.1           # intake rate constant: intake when structural weight
+                         #   is 1 g (g d-1), includes assimilation efficiency 
+g1      <- 0.6667        # power to uptake rate with S weight
+
+ms      <- 0.003         # maintenance cost of structural mass (g d-1 g-1)
+mr      <- 0.0003        # maintenance cost of reversible mass (g d-1 g-1)  
+
+s_eff   <- 0.3333        # conv. efficiency of assimilated intake to structure
+r_eff   <- 0.9           # conv. efficiency of assimilated intake to reversible
+
+# Reproductive cost function 
+ra      <- 6             # reprod cost for 1 g of struct weight: (g g-1)
+rb      <- 0.6           # reprod cost power w.r.t. structural weight
+
+# Mortality parameters 
+#m_min   <- 0.2/365      # background mortality rate (d-1) 
+
+# m1                    # steepness of the length-dependent mortality rate
+m_max   <- 4/365        # max length-dependent mortality rate (d-1)
+
+s1      <- 7.0          # steepness of the condition related mortality rate
+s_max   <- 4/365        # maximum condition related rate (d-1) [when R = 0]
+
+ #Fishing mortality parameters 
+# Egle - F changed to 0
+Fm   <- 0               # Instantaneous fishing mortality (day-1)
+Fmid <- 0.3             # length (in meters) of the 50% fishing selectivity
+Fk   <- 20              # steepness of the logistic fishing function 
+
+# Egle - temperature parameters added 
+
+# These are important - we are looking at growth changes after 3C of warming
+Temp <- 283              # ambient temperature, in Kelvin
+Tref <- 280              # reference temperature, in Kelvin
+k    <- 0.00008617332    # Boltzman constant 
+```
+
+# Scenarios
+
+```{r}
+#different scenarios with already optimised parameters (in excel)  
+scen_par <- read.csv(file="Scenarios3.csv", header=TRUE, sep=",",
+  dec=".") 
+nscen <- length(scen_par$Sc)
+
+scen_used <- read.csv(file="FinalScenarioNos.csv", header=FALSE, fileEncoding="UTF-8-BOM", sep=",",
+  dec=".") 
+names(scen_used) <- "Sc_int"
+# number of scenarios
+scen_used <- scen_used %>%
+  mutate(Sc = paste("Sc", as.character(Sc_int), sep = ""))
+nscen_used <- length(scen_used$Sc)
+scen_used$Sc_new <- 1:nrow(scen_used)
+
+# create global scenario variables extracted from scenario 
+Em <- 0.0
+Ei <- 0.0
+cm <- 0.0
+ci <- 0.0
+m1 <- 0.0
+m_min <- 0.0
+# create global optimal LH-variables extracted from scenario 
+rs1   <- 0.0
+a_bar <- 0.0
+w     <- 0.0
+
+GetScenario <- function(Sc) {
+  rw <- which(scen_par$Sc == Sc)
+  
+  Em <<- scen_par$Em[rw[1]]
+  Ei <<- scen_par$Ei[rw[1]]
+  cm <<- scen_par$cm[rw[1]]
+  ci <<- scen_par$ci[rw[1]]
+  m1 <<- scen_par$m1[rw[1]]
+  m_min <<- scen_par$m_min[rw[1]]
+  
+  rs1   <<- scen_par$rs1[rw[1]]
+  a_bar <<- scen_par$a_bar[rw[1]]
+  w     <<- scen_par$w[rw[1]]
+
+  return(length(rw) == 0) # found a valid scenario
+}
+
+GetScenario_new <- function(Sc_new) {
+  rw <- which(scen_par$Sc == scen_used$Sc[Sc_new])
+  
+  Em <<- scen_par$Em[rw[1]]
+  Ei <<- scen_par$Ei[rw[1]]
+  cm <<- scen_par$cm[rw[1]]
+  ci <<- scen_par$ci[rw[1]]
+  m1 <<- scen_par$m1[rw[1]]
+  m_min <<- scen_par$m_min[rw[1]]
+  
+  rs1   <<- scen_par$rs1[rw[1]]
+  a_bar <<- scen_par$a_bar[rw[1]]
+  w     <<- scen_par$w[rw[1]]
+
+  return(length(rw) == 0) # found a valid scenario
+}
+```
+
+## turn off life-history optimisation
+
+```{r eval = TRUE}
+# This code turns off selection and uses the base-line allocation strategy 
+#   for all scenarios
+
+# do_not_optimise_new <- c(4,15,17,28)
+# do_not_optimise_old <- scen_used$Sc_int[do_not_optimise_new]
+
+## if you want to run scnenarios without life-history optimisation, uncomment lines below
+# do_not_optimise_old <- 2:nrow(scen_par)
+# scen_par$rs1[do_not_optimise_old] <- scen_par$rs1[1]
+# scen_par$a_bar[do_not_optimise_old] <- scen_par$a_bar[1]
+# scen_par$w[do_not_optimise_old] <- scen_par$w[1]
+```
+
+# Fig. 3: scaling of rates
+
+```{r}
+GetScenario_new(17)
+
+TC     <- 7:10
+Temp_v <- TC + 273
+
+# Egle - extended to include temperature
+Eiscalar_v <- exp((-Ei/k)*(1/Temp_v-1/Tref))
+Emscalar_v <- exp((-Em/k)*(1/Temp_v-1/Tref))
+
+df_temperature <- tibble(
+  Temperature = TC,
+	Intake      = Eiscalar_v,
+	Metabolism  = Emscalar_v
+) %>%
+gather(key = "Process", value = "Scalar", 2:3)
+
+p1 <- ggplot(df_temperature) +
+	geom_line(aes(x = Temperature, y = Scalar, color = Process)) +
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  ylim(1,1.4) +
+  labs(
+    x = expression("Temperature ("*~degree*C*")"),
+    y = expression("Scalar, "*phi)) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "none")
+p1
+```
+
+```{r}
+mass_min <- 1    # minimum mass to plot (g)
+mass_max <- 1000 # maximum mass to plot (g)
+mass_n   <- 20   # masses to plot
+
+m <- mass_min*((mass_max/mass_min)^((1:mass_n - 1)/(mass_n-1)))
+
+scenarios <- c(17, 19, 28) # original scenario
+
+v_scen <- NULL
+v_type <- NULL
+v_mass <- NULL
+v_phi  <- NULL
+
+for (i in scenarios) {
+  GetScenario_new(i)
+  
+  v_scen <- c(v_scen, rep(i, mass_n))
+  v_type <- c(v_type, rep("Intake", mass_n))
+  v_mass <- c(v_mass, m)
+  v_phi  <- c(v_phi, phi(Temp, Tref, m, "I"))
+  
+  v_scen <- c(v_scen, rep(i, mass_n))
+  v_type <- c(v_type, rep("Metabolism", mass_n))
+  v_mass <- c(v_mass, m)
+  v_phi  <- c(v_phi, phi(Temp, Tref, m, "M"))
+}
+
+df_phi <- tibble(
+    Sc = v_scen, type = v_type, mass = v_mass, phi = v_phi
+  ) %>% mutate(
+    grp = paste(Sc, type, sep = "_")
+  )
+```
+
+```{r}
+p2 <- ggplot(df_phi) +
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(aes(x = mass, y = phi, color = type, 
+    linetype = factor(Sc), group = grp)) +
+  labs(
+    x = "Mass (g)", y = expression("Scalar, "*phi), 
+    color = "Process", linetype = "Scenario") +
+  ylim(0.9,1.8) +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+```{r}
+plot_grid(p1, p2, labels = c("A", "B"), rel_widths = c(1,1.5))
+```
+
+### ### 
+
+# Main loop: scenario predictions
+
+```{r}
+# useful age-dependent values
+Res               <- array(data=0,c(max_age_years,365, nscen_used))
+Str               <- array(data=0,c(max_age_years,365, nscen_used))
+dayIntake         <- array(data=0,c(max_age_years,365, nscen_used))
+dayMaintenance    <- array(data=0,c(max_age_years,365, nscen_used))
+dayNetIntake      <- array(data=0,c(max_age_years,365, nscen_used))
+dayLambda         <- array(data=0,c(max_age_years,365, nscen_used))
+dayPredatorLength <- array(data=0,c(max_age_years,365, nscen_used))
+daySurvival       <- array(data=0,c(max_age_years,365, nscen_used))
+yearSpawn         <- array(data=0,c(max_age_years, nscen_used))
+yearRepCost       <- array(data=0,c(max_age_years, nscen_used))
+yearFitness       <- array(data=0,c(max_age_years, nscen_used))
+natmortality      <- array(data=0,c(max_age_years,365, nscen_used))
+fishmortality     <- array(data=0,c(max_age_years,365, nscen_used))
+dayGrowth         <- array(data=0,c(max_age_years,365, nscen_used))
+relGrowth         <- array(data=0,c(max_age_years,365, nscen_used))
+strGrowth         <- array(data=0,c(max_age_years,365, nscen_used))
+
+for (aa in 1: nscen_used) { # aa is the scenario number
+  a1 <- which(scen_par$Sc == scen_used$Sc[aa])[1]
+  # extract scenario patrameters and optimal LH
+  Em <- scen_par$Em[a1]
+  Ei <- scen_par$Ei[a1] 
+  cm <- scen_par$cm[a1]
+  ci <- scen_par$ci[a1] 
+  m1 <- scen_par$m1[a1]
+  m_min <- scen_par$m_min[a1]
+  
+  Eiscalar <- exp((-Ei/k)*(1/Temp-1/Tref))
+  Emscalar <- exp((-Em/k)*(1/Temp-1/Tref))
+  
+  rs1   <- scen_par$rs1[a1]  
+  a_bar <- scen_par$a_bar[a1]
+  w     <- scen_par$w[a1]
+  
+  # set initial weight
+  S0 <- 1             # initial weight 
+  R0 <- S0*RSRatio(0) # enforce correct initial reserve-structural ratio
+  S0 <- 1/(1+RSRatio(0))
+  R0 <- RSRatio(0) *S0
+
+	# set day 1 year 1 mass
+  Res[1,1,aa] <- R0
+  Str[1,1,aa] <- S0
+
+  daySurvival[1,1,aa] <- 1.0 # initially all individuals are alive  
+
+  # perform the simulation
+  for (yr in 1:max_age_years) { # for each year
+     for (day in 1:364) { # for each day
+      Rstart <- Res[yr,day,aa] # starting mass (reserve)
+      Sstart <- Str[yr,day,aa] # starting mass (structure)
+    
+      # calc length using str
+      dayPredatorLength[yr,day,aa] <- (Sstart/l_const)^(1/3.0) 
+      fish_mort <- Fm / (1+exp(-Fk*(dayPredatorLength[yr,day,aa]-Fmid)))
+      mort_rate <- m_min + 
+      	(m_max-m_min)*exp(-m1*dayPredatorLength[yr,day,aa]) + # predation
+        s_max*exp(-s1*Rstart/Sstart)   +                      # starve
+        fish_mort                                             # fishing
+      
+      fishmortality[yr,day+1,aa] <- fish_mort   
+      mort_prob <- 1.0 - exp(-mort_rate) # probability die this day
+      # prob alive
+      daySurvival[yr,day+1,aa] <- (1-mort_prob)*daySurvival[yr,day,aa] 
+      natmortality[yr,day+1,aa] <- m_min + 
+      	(m_max-m_min)*exp(-m1*dayPredatorLength[yr,day,aa]) + # predation
+        s_max*exp(-s1*Rstart/Sstart)                          # starve
+
+      # temperature-dependent intake
+      intake <- g0*Sstart^g1 * 
+      	Eiscalar * Sstart^(ci*(Temp-Tref))
+    
+      respiration <- (ms*Sstart + mr*Rstart) * 
+      	Emscalar * (Sstart + Rstart)^(cm*(Temp-Tref)) # (g d-1)
+      net_intake  <- intake - respiration             # (g d-1)
+
+      dayIntake[yr, day,aa]      <- intake
+      dayMaintenance[yr, day,aa] <- respiration
+      dayNetIntake[yr, day,aa]   <- net_intake
+      age                        <- 365*(yr-1) + day # age of animal (days)
+      
+      # add bounds to prevent numerical issues when calculating lambda
+      tmp <- rs1*(age-a_bar)
+      tmp <- max(tmp, -20) # bound below
+      tmp <- min(tmp,  20) # bound above
+      dayLambda[yr, day,aa] <- rs_min + (rs_max - rs_min)*exp(tmp) /
+        (1.0 + exp(tmp)) # RS ratio = strategy
+    
+      if (net_intake >= 0) {
+        dR <- r_eff*net_intake # maximum R allocation
+        dS <- s_eff*net_intake # maximum S allocation
+        # use Lambdamax instead of dayLambda and set w=1  
+        if (dayLambda[yr, day,aa]*Sstart > Rstart) { # need to bump up reserves
+          r_take <- min(dayLambda[yr, day,aa]*Sstart - Rstart, dR) 
+          Rstart <- Rstart + r_take
+          net_intake <- net_intake - r_take/r_eff
+        } else { # need to bump up structure
+          s_take <- min(Rstart/dayLambda[yr, day,aa] - Sstart, dS) 
+          Sstart <- Sstart + s_take
+          net_intake <- net_intake - s_take/s_eff
+        }
+        
+        # partition remaining mass to keep desired ratio
+        Res[yr,day+1,aa] <- Rstart + dayLambda[yr, day,aa] * r_eff * s_eff *
+        	net_intake / (r_eff + dayLambda[yr, day,aa]*s_eff) 
+        Str[yr,day+1,aa] <- Sstart + r_eff*s_eff*net_intake / 
+        	(r_eff +     dayLambda[yr, day,aa]*s_eff)       
+      } else {
+      	# what should be taken from R given the conversion inefficiencies 
+        dR <- (1/r_eff)*net_intake 
+        newR <- (Rstart + dR)
+        if (newR < 0) {
+          newR <- 0
+        }
+     
+        Res[yr,day+1,aa] <- newR
+        Str[yr,day+1,aa] <- Sstart
+      }  
+
+      # percentage change in weight over the day
+      Growth <- (Res[yr,day+1,aa]+Str[yr,day+1,aa]) -
+      	(Res[yr,day,aa]+Str[yr,day,aa]) 
+      percGrowth           <- (Growth/(Res[yr,day,aa]+Str[yr,day,aa])) * 100
+      sGrowth              <- Growth/Str[yr,day,aa] * 100
+      dayGrowth[yr,day,aa] <-  Growth
+      relGrowth[yr,day,aa] <- percGrowth
+      strGrowth[yr,day,aa] <- sGrowth
+    }
+
+    dayPredatorLength[yr,365,aa] <- dayPredatorLength[yr,364,aa]
+    dayGrowth[yr,365,aa]         <- dayGrowth[yr,364,aa]
+    relGrowth[yr,365,aa]         <- relGrowth[yr,364,aa]
+    strGrowth[yr,365,aa]         <- strGrowth[yr,364,aa]
+
+    # perform spawning
+    repro_cost <- ra*Str[yr,365,aa]^rb # fixed cost of reproduction
+    # spawning mass after cost
+    spawn_mass <- max(0, w*Res[yr,365,aa] - repro_cost) 
+  
+    if (spawn_mass > 0) { # enough to spawn?
+      Res[yr,365,aa]     <- Res[yr,365,aa] - spawn_mass - repro_cost
+      yearSpawn[yr,aa]   <- spawn_mass
+      yearRepCost[yr,aa] <- repro_cost
+      yearFitness[yr,aa] <- spawn_mass*daySurvival[yr,365,aa]
+    } 
+  
+    if (yr < max_age_years) {
+      Str[yr+1,1,aa]         <- Str[yr,365,aa]
+      Res[yr+1,1,aa]         <- Res[yr,365,aa]
+      daySurvival[yr+1,1,aa] <- daySurvival[yr,365,aa]
+      natmortality[yr+1,1,aa]  <- natmortality[yr,365,aa]
+      fishmortality[yr+1,1,aa]  <- fishmortality[yr,365,aa]
+    }
+  }
+}
+```
+
+# Fitness
+
+```{r}
+## Fitnesses of all scenarios
+v_LifetimeFitness <- apply(yearFitness, 2, sum) # expected life-time fitness
+df_LifetimeFitness <- tibble(
+	Sc = scen_used$Sc,
+	LifetimeFitness = v_LifetimeFitness
+) %>%
+left_join(scen_used, by = "Sc")
+
+ggplot(df_LifetimeFitness) +
+	geom_point(aes(x = Sc_new, y = LifetimeFitness)) +
+	theme_bw() +
+	labs(y = "Expected lifetime spawning biomass") +
+	theme()
+```
+
+# make scenario dataframe
+
+```{r fig.width=9, fig.height=7}
+param_value <- NULL
+param_type  <- NULL
+age         <- NULL
+scenario    <- NULL
+baseline    <- NULL
+
+#if plotting for first 8 years uncomment this
+#max_age_years <- 8
+
+# calculate year of maturation
+maturation_age <- rep(1, nscen_used)
+for (i in 1:nscen_used) {
+  for (j in 1:max_age_years) {
+   	if (yearSpawn[j,i] == 0) {
+   	  maturation_age[i] <- maturation_age[i] + 1
+   	}
+  }
+}
+
+# create some useful summary statistics
+scen_par <- scen_par %>%
+	mutate(
+		Em_gt_Ei = Em > Ei,
+		cm_gt_ci = cm > ci
+	)
+
+df_scenario <- tibble(
+  scenario = scen_used$Sc_int,
+	maturation_age = maturation_age
+)
+df_scenario$Em_gt_Ei <- scen_par$Em_gt_Ei[scen_used$Sc_int]
+df_scenario$cm_gt_ci <- scen_par$cm_gt_ci[scen_used$Sc_int]
+df_scenario$m1 <- scen_par$m1[scen_used$Sc_int]
+df_scenario$m1 <- factor(df_scenario$m1)
+
+# create a large age-length relation for each scenario
+for (aa in 1: nscen_used) { # for each scenario
+  for (yr in 1:max_age_years) { # for each year
+    param_value <- c(param_value, dayPredatorLength[yr, ,aa]) # save reserves
+    age         <- c(age, 1:365 + 365*(yr-1))            # add next year
+    param_type  <- c(param_type, rep("Reversible", 365)) # add parameter
+    scenario    <- c(scenario, rep(scen_used$Sc_int[aa],365))              # add scenario
+  }
+}
+
+# place values into a data frame
+df_length <- tibble(
+	age = age, 
+	type = param_type, 
+	value = param_value, 
+	scenario = scenario
+) %>%
+left_join(df_scenario, by = "scenario")
+
+df_length$maturation_age <- factor(df_length$maturation_age)
+
+# create a reference data set and scenario data set
+df_baseline <- filter(df_length, scenario == "1") %>%
+	dplyr::select(-scenario)
+df_other    <- filter(df_length, scenario != "1")
+names(df_other)[4] <- "Sc_int"
+df_other <- left_join(df_other, scen_used, by = "Sc_int")
+
+rm(df_length) # don't need this now
+```
+
+### ### 
+# Plots
+
+## Baseline scenario growth 
+(not needed)
+
+```{r fig.height = 3, fig.width=5}
+# bounds for plotting
+l_min   <- 0.0           # minimum length for plotting (m)
+l_max   <- 0.45          # maximum length for plotting (m)
+w_min   <- 1             # minimum mortality rate for plotting (d-1)
+w_max   <- 2000          # maximum mortality rate for plotting (d-1)
+  
+# prepare data frame to display RS ratio
+res <- GetScenario_new(1)
+
+vec_age <- seq(from = 0, to = max_age_days, by = 1)
+df_RS   <- tibble(
+	Age = vec_age, 
+	RSratio = sapply(vec_age, FUN = RSRatio)
+)
+
+p1 <- ggplot(df_RS, aes(x = Age, y = RSratio)) + 
+	geom_line() + 
+  ylim(0,rs_max) + 
+	labs(
+	  x = "Age (days)", 
+	  y = "Ratio (Reserve:Structure)", 
+    subtitle = "Strategy: desired R:S ratio"
+	) +
+  theme_bw()
+```
+
+```{r}
+# prepare data frame to display survival curve
+vec_length <- seq(from = l_min, to = l_max, length.out = 101)
+df_Length <- tibble(
+	Length = vec_length, 
+	Prob = mortProb(vec_length)
+)
+df_Length <- mutate(df_Length, Survive_Y = 1.0/(Prob*365.0))
+
+
+p2 <- ggplot(df_Length, aes(x = Length, y = Survive_Y)) + 
+	geom_line() + 
+	labs(
+	  x = "Length (m)", 
+	  y = "Expected survival (y)", 
+    subtitle = "Starvation independent survivorship"
+	) +
+	theme_bw()
+```
+
+```{r}
+# prepare data frame to display reproductive costs
+vec_weight <- seq(from = w_min, to = w_max, length.out = 101)
+df_weight <- tibble(
+	Weight = vec_weight, 
+	Cost = reproCost(vec_weight)
+)
+
+p3 <- ggplot(df_weight, aes(x = Weight, y = Cost)) + 
+	geom_line() + 
+  geom_abline(intercept = 0, slope = 1, color = "grey") +
+	labs(
+	  x = "Structural weight (g)", 
+	  y = "Reproductive cost (g)", 
+    subtitle = "Reproduction cost (non-spawn mass)"
+	) +
+	theme_bw()
+```
+
+```{r fig.width = 9, fig.height = 4}
+plot_grid(p1, p2, p3, ncol = 3)
+```
+
+### Growth (Length)
+
+# make growth plot dataframe
+
+```{r}
+param_value <- NULL
+param_type  <- NULL
+age         <- NULL
+scenario    <- NULL
+baseline    <- NULL
+
+# create a large age-length relation for each scenario
+for (aa in 1: nscen_used) { # for each scenario
+  for (yr in 1:max_age_years) { # for each year
+    param_value <- c(param_value, Str[yr, ,aa] + Res[yr, , aa]) # save reserves
+    age         <- c(age, 1:365 + 365*(yr-1))            # add next year
+    param_type  <- c(param_type, rep("Mass", 365)) # add parameter
+    scenario    <- c(scenario, rep(scen_used$Sc_int[aa],365))              # add scenario
+  }
+}
+
+# place values into a data frame
+df_mass <- tibble(
+	age = age, 
+	type = param_type, 
+	value = param_value, 
+	scenario = scenario
+) %>%
+left_join(df_scenario, by = "scenario")
+
+df_mass$maturation_age <- factor(df_mass$maturation_age)
+
+# create a reference data set and scenario data set
+df_baseline_mass <- filter(df_mass, scenario == "1") %>%
+	dplyr::select(-scenario)
+df_other_mass    <- filter(df_mass, scenario != "1")
+names(df_other_mass)[4] <- "Sc_int"
+df_other_mass <- left_join(df_other_mass, scen_used, by = "Sc_int")
+rm(df_mass) # don't need this now
+```
+
+# growth in all scenarios
+
+## by length
+
+```{r fig.width=9, fig.height=6}
+# colour by age at maturation
+ggplot() + 
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(data = df_other, 
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = df_baseline, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Length (m)",
+  	color = "Age at\nmaturation (y)",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+	# scale_y_log10() +
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+## by weight
+
+```{r fig.width=9, fig.height=6}
+# colour by age at maturation
+ggplot() + 
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(data = df_other_mass, 
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = df_baseline_mass, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Weight (g)",
+  	color = "Age at\nmaturation (y)",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+	scale_y_log10() +
+  facet_wrap( ~ Sc_new, ncol = 6) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+## 4 scenarios length 
+
+```{r}
+# colour by age at maturation
+ggplot() + 
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(data = filter(df_other, Sc_new %in% c(4,15,17,28)),
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = df_baseline, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Length (m)",
+  	color = "Age at\nmaturation (y)"
+  ) + 
+	# scale_y_log10() +
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+```
+
+## 4 scenarios weight 
+
+```{r}
+# colour by age at maturation
+p1 <- ggplot() + 
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(data = filter(df_other_mass, Sc_new %in% c(4,15,17,28)),
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = df_baseline_mass, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Weight (g)",
+  	color = "Age at\nmaturation (y)"
+  ) + 
+	scale_y_log10() +
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+# colour by age at maturation
+p2 <- ggplot() + 
+  scale_color_manual(values = c("#ef8a62","#67a9cf")) +
+  geom_line(data = filter(df_other_mass, Sc_new %in% c(4,15,17,28), age < 3*365),
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = filter(df_baseline_mass, age < 3*365),
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Weight (g)",
+  	color = "Age at\nmaturation (y)"
+  ) + 
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+
+plot_grid(p1, p2, labels = c("A", "B"), ncol = 1)
+```
+
+## all sceanarios weight non logged
+
+```{r fig.width=9, fig.height=6}
+# colour by age at maturation
+ggplot() + 
+  geom_line(data = df_other_mass, 
+  	aes(x = age, y = value, color = maturation_age), size = 1) +
+  geom_line(data = df_baseline_mass, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Mass (g)",
+  	color = "Age at\nmaturation (y)",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+	# scale_y_log10() +
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+### growth in all sc: by Em>Ei
+
+```{r fig.width=9, fig.height=6}
+# colour by Em > Ei
+ggplot() + 
+  geom_line(data = df_other, 
+  	aes(x = age, y = value, color = Em_gt_Ei), size = 1) +
+  geom_line(data = df_baseline, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Length (m)",
+  	color = "Em > Ei",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+  facet_wrap( ~ Sc_new) +   
+	# scale_y_log10() +
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+### growth in all sc: by cm>ci 
+
+```{r fig.width=9, fig.height=6}
+# colour by cm > ci
+ggplot() + 
+  geom_line(data = df_other, 
+  	aes(x = age, y = value, color = cm_gt_ci), size = 1) +
+  geom_line(data = df_baseline, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+	# scale_y_log10() +
+  labs(
+  	x ="Age (d)",
+	  y = "Length (m)",
+  	color = "cm > ci",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+### growth in all sc: by m1
+
+```{r fig.width=9, fig.height=6}
+# colour by m1
+ggplot() + 
+  geom_line(data = df_other, 
+  	aes(x = age, y = value, color = m1), size = 1) +
+  geom_line(data = df_baseline, 
+  	aes(x = age, y = value), color = "black", size = 0.5) + 
+  labs(
+  	x ="Age (d)",
+	  y = "Length (m)",
+  	color = "m1",
+  	subtitle = "Black is baseline, coloured is scenario"
+  ) + 
+	# scale_y_log10() +
+  facet_wrap( ~ Sc_new) +   
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+```
+
+### ### 
+# Export summary values
+
+```{r}
+# 1 - juvenile growth - as length and Wgt after 1 and 2 years
+Length_1y <- dayPredatorLength[1,364,]*100
+Length_2y <- dayPredatorLength[2,364,]*100
+
+Wgt_1y <- Str[1,364,] + Res[1,364,]
+Wgt_2y <- Str[2,364,] + Res[2,364,]
+
+# 2 - maturation age in years
+matur_age <- rep(NA, times = nscen_used)
+for (i in 1:nscen_used) {
+  matur_age[i] <- min(which(yearSpawn[ ,i] > 0))
+}
+
+# 3 - maturation length 
+matur_length <- rep(NA, times = nscen_used)
+for (i in 1:nscen_used) {
+  matur_length[i] <- dayPredatorLength[matur_age[i],364,i]*100
+}
+
+# 4 - adults size - Length and weight at 8, 10, 15y 
+Length_5y  <- dayPredatorLength[5,364,  ]*100
+Length_8y  <- dayPredatorLength[8,364,  ]*100
+Length_10y <- dayPredatorLength[10,364, ]*100
+Length_15y <- dayPredatorLength[15,364, ]*100
+Length_20y <- dayPredatorLength[20,364, ]*100
+
+Wgt_5y  <- Str[5,364,  ] + Res[5, 364, ]
+Wgt_8y  <- Str[8,364,  ] + Res[8, 364, ]
+Wgt_10y <- Str[10,364, ] + Res[10,364, ]
+Wgt_15y <- Str[15,364, ] + Res[15,364, ]
+Wgt_20y <- Str[20,364, ] + Res[20,364, ]
+
+# 5 - reproductive output at first reproduction and in year 3
+first_spawn <- rep(NA, times = nscen_used)
+for (i in 1:nscen_used) {
+  first_spawn[i] <- yearSpawn[matur_age[i],i]
+}
+
+spawn_year3 <- yearSpawn[3, ]
+
+# total fitness 
+totalFitness <- apply(yearFitness, 2, sum) 
+
+# combine into one dataframe
+result_data <- as.data.frame(cbind(
+	Length_1y, Length_2y, Length_5y, Length_8y, Length_10y, Length_15y, Length_20y,
+	matur_length, matur_age, 
+	Wgt_1y, Wgt_2y,Wgt_5y, Wgt_8y, Wgt_10y, Wgt_15y, Wgt_20y, 
+	first_spawn, spawn_year3, totalFitness)
+)
+
+result_scaled <- result_data
+for (i in 1:ncol(result_scaled)) {
+  for (j in 2:nrow(result_scaled)) {
+    result_scaled[[i]][j] <- 	result_scaled[[i]][j] / result_scaled[[i]][1]
+  }
+}
+
+ratio_names <- names(result_scaled)
+
+result_scaled$scenario <- scen_used$Sc_int
+
+result_scaled <- result_scaled %>%
+	left_join(df_scenario, by = "scenario")
+
+plot_scaled <- gather(result_scaled, key = "Parameter", 
+  value = "Ratio", 1:(length(ratio_names))) %>%
+	filter(scenario != 1)
+
+plot_scaled$Parameter <- factor(plot_scaled$Parameter,
+	levels = ratio_names)
+
+plot_scaled$scenario <- factor(plot_scaled$scenario)
+
+#write.csv(result_scaled, file = "result_scaled.csv")
+```
+
+convert ggplot, make a data frame to add scenario parameters?
+color = cm < ci, cm = ci, cm > ci 
+shape = maturation age (2)
+size = m1 (slope) 1,2,4,6,8,20 (8 or 10 gives TSR) fewer sizes (grouped)?
+
+# Fig. 1: allocation strategies
+
+```{r}
+df_plot <- scen_par %>%
+  filter(Sc %in% scen_used$Sc) %>%
+  arrange(Sc)
+
+df_scenario <- df_scenario %>% 
+  mutate(Sc = paste("Sc", as.character(scenario), sep = "")) %>%
+  arrange(Sc)
+
+df_plot$maturation_age <- factor(df_scenario$maturation_age)
+
+# create some useful summary statistics
+df_plot <- df_plot %>%
+	mutate(
+		Em_gt_Ei = ifelse(Em == Ei, "eq", 
+		  ifelse(Em > Ei, "gt", "lt")),
+		cm_gt_ci = ifelse(cm == ci, "AM=AI", 
+		  ifelse(cm > ci, "AM>AI", "AM<AI")),
+	  m1_F = ifelse(m1 == 8, "=8", 
+	    ifelse(m1 >8, ">8", "<8"))
+	)
+
+df_plot$Em_gt_Ei <- factor(df_plot$Em_gt_Ei, 
+  levels = c("lt", "eq", "gt"))
+df_plot$cm_gt_ci <- factor(df_plot$cm_gt_ci, 
+  levels = c("AM<AI", "AM=AI", "AM>AI"))
+df_plot$m1_F <- factor(df_plot$m1_F, 
+  levels = c("<8", "=8", ">8"))
+
+p1 <- ggplot(df_plot) +
+  scale_shape_manual(values = c(1,19)) +
+  scale_size_manual(values = c(1,2,4)) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  geom_point(aes(x = a_bar, y = w, color = cm_gt_ci, 
+    shape = maturation_age, size = m1_F)) +
+  labs(
+    x = "Age (days) at 50% allocation to R pool", 
+    y = "Proportion of reserves allocated to reproduction, w",
+    shape = "Age at\nmaturity (y)",
+    color = "Size\nscaling",
+    size = "Length-dependent\nvulnerability, zP"
+  ) + 
+  theme_bw() + 
+  theme(
+    legend.position="none",
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+p2 <- ggplot(df_plot) +
+  scale_shape_manual(values = c(1,19)) +
+  scale_size_manual(values = c(1,2,4)) +
+  scale_color_manual(values = c("#1b9e77", "#d95f02", "#7570b3")) +
+  geom_point(aes(x = a_bar, y = rs1, color = cm_gt_ci, 
+    shape = maturation_age, size = m1_F)) +
+  labs(
+    x = "Age (days) at 50% allocation to R pool", 
+    y = "Age-dependent transition to reserve allocation, r",
+    shape = "Age at\nmaturity (y)",
+    color = "Size\nscaling",
+    size = "Length-dependent\nvulnerability, zP"
+  ) + 
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank()
+  )
+
+plot_grid(p1, p2, labels = c("A", "B"), rel_widths = c(1, 1.6))
+```
+
+## natural mortality
+
+```{r}
+# Methods based
+scenMort <- c(1, 10:13) # scenarios where only mortality changes
+# Add scenarios 10:13 with change in m_min
+
+# Plot base scenario (Eq, 3a)
+plot(
+  x = dayPredatorLength[1,-1,scenMort[1]], 
+  y = natmortality[1,-1,scenMort[1]], 
+  type = 'l', ylim = c(0, 0.01), 
+  xlab = "Length, m", ylab = "Daily mortality")
+
+# add scenarios: 
+# only plots first year: extend to 10 years and look for convergence
+for (i in 2:length(scenMort)) {
+  points(
+    x = dayPredatorLength[1,-1,scenMort[i]],
+    y = natmortality[1,-1,scenMort[i]], 
+    type = 'l',col = 'red')
+}
+```
+
+## Population growth rate
+
+```{r}
+#to calcualte average generation time we need to do sum(survX * reprX * X)
+
+#reset back to original values, as some plots used smaller ranges
+max_age_years = 20
+
+
+upperTerm <- array(data=0,c(max_age_years, nscen_used))
+
+for (b in 1:nscen_used) {
+for (i in 1:max_age_years) {
+  upperTerm[i, b] <- daySurvival[i, 365, b] * yearSpawn[i,b] * i
+  
+}
+}
+
+
+upperTermSc <- apply(upperTerm, 2, sum)
+v_LifetimeFitness
+Gen_sc <- upperTermSc/v_LifetimeFitness
+
+popGrRate <- log(v_LifetimeFitness)/Gen_sc
+
+scen_used$r0 <- popGrRate
+goodOnes <- c(4, 14, 15, 16, 17, 18, 19, 28, 29, 32)
+
+plot(scen_used$Sc_new, scen_used$r0, xlab ="Scenario number", ylab = "Population growth rate, r0")
+points(scen_used$Sc_new[goodOnes], scen_used$r0[goodOnes], pch = 19, col = 'red')
+
+abline(h= scen_used$r0[1])
+abline(v = c(13.5, 16.5, 26.5, 33.5), lty =2)
+
+
+```
+
