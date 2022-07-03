@@ -142,7 +142,6 @@ Tref <- 280              # reference temperature, in Kelvin
 k    <- 0.00008617332    # Boltzman constant 
 ```
 
-
 # Scenarios
 
 ```{r}
@@ -523,7 +522,7 @@ int.v <- c(int.v,dayIntake[i,days,sc])
 # plot(str.v, maint.v, type = 'l', ylim = c(0, 30), xlim = c(0, 4500))
 # points(str.v, int.v, type = 'l', lty = 2)
 
-plot(len.v, maint.v, type = 'l', ylim = c(0, 25), xlab = "Fish length, m", ylab = "Daily intake and maintenance, g")
+plot(len.v, maint.v, type = 'l', ylim = c(0, 25), xlab = "Fish length (m)", ylab = "Daily intake and maintenance (g)")
 points(len.v, int.v, type = 'l', lty = 2)
 
 sc = 17
@@ -662,6 +661,40 @@ rm(df_length) # don't need this now
 
 # Figure A1: allocation strategy
 
+code and plot suggested by the reviewer Jan Kozlowski (thank you)
+
+```{r}
+#Eq. 1
+#parameters
+lambda.min<-0
+lambda.max<-1.3
+
+r<-c(0.001,0.002)
+a.dash<-c(200,500)
+
+lambda<-function(a,r,a.dash)
+{temp<-lambda.max-lambda.min
+temp1<-exp(r*(a-a.dash))
+temp1<-temp1/(1+temp1)
+lambda<-lambda.min+temp*temp1}
+
+a<-seq(0,3650,1)
+lambda.a<-lambda(a,r[1],a.dash[1])
+a.year<-a/365
+plot(a.year,lambda.a, type="l",xlab="Age (years)",ylab="Target reversible:structural ratio")
+lambda.a<-lambda(a,r[2],a.dash[1])
+lines(a.year,lambda.a, type="l",lty='dashed')
+lambda.a<-lambda(a,r[1],a.dash[2])
+lines(a.year,lambda.a, type="l",col="grey", lwd = 2)
+lambda.a<-lambda(a,r[2],a.dash[2])
+lines(a.year,lambda.a, type="l",col="grey",lty='dashed', lwd = 2)
+legend(6.5,0.8,legend=c("r=0.001, a.dash=200", "r=0.002, a.dash=200","r=0.001, a.dash=500", "r=0.002, a.dash=500"),
+       col=c("black", "black","grey","grey"), title=paste("Lambda.max=1.3; Lambda.min=0"),lty=c(1,2,1,2), cex=0.8)
+
+```
+
+### old version, not used now
+
 ```{r fig.height = 3, fig.width=5}
 # bounds for plotting
 l_min   <- 0.0           # minimum length for plotting (m)
@@ -713,6 +746,62 @@ p2
 ```
 
 # Fig. A2: Mortality 
+
+code and plot suggested by the reviewer Jan Kozlowski (thank you)
+
+```{r}
+
+#Eq. 3a
+zp<-c(4,6,8,10)
+#m.min recalculated for a day basis; originally 0.2 and 0.4
+m.min<-c(0.0005479,0.00109589)
+m.max<-0.0109589
+#length, in meters, from 0 to 1, by 1 cm
+L<-seq(0,1, by = 0.01)
+
+m.l<-function(zp,m.min,m.max,L)
+{m.l<-m.min+(m.max-m.min)*exp(-zp*L)}
+
+m.l1<-m.l(zp[1],m.min[1],m.max,L)
+m.l2<-m.l(zp[1],m.min[2],m.max,L)
+m.l3<-m.l(zp[2],m.min[1],m.max,L)
+m.l4<-m.l(zp[2],m.min[2],m.max,L)
+m.l5<-m.l(zp[3],m.min[1],m.max,L)
+m.l6<-m.l(zp[3],m.min[2],m.max,L)
+m.l7<-m.l(zp[4],m.min[1],m.max,L)
+m.l8<-m.l(zp[4],m.min[2],m.max,L)
+
+#c1<-expression("M['P,min']")
+
+df.l<-data.frame(L,m.l1,m.l2,m.l3,m.l4)
+fig2<-ggplot()+
+  theme_classic()+
+  theme(legend.position = c(0.7,0.8))+
+  xlab("Fish length (m)")+
+  ylab("Instantaneous mortality rate (per day)")+
+  geom_blank(aes(show.legend=TRUE))+
+  
+  geom_line(data=df.l, aes(x=L,y=m.l1,color="zp = 4"))+
+  geom_line(data=df.l, aes(x=L,y=m.l2,color="zp = 4"),linetype="dashed")+
+  
+  geom_line(data=df.l, aes(x=L,y=m.l3,color="zp = 6"))+
+  geom_line(data=df.l, aes(x=L,y=m.l4,color="zp = 6"),linetype="dashed")+
+
+  geom_line(data=df.l, aes(x=L,y=m.l5,color="zp = 8"))+
+  geom_line(data=df.l, aes(x=L,y=m.l6,color="zp = 8"),linetype="dashed")+
+  
+  geom_line(data=df.l, aes(x=L,y=m.l7,color="zp = 10"))+
+  geom_line(data=df.l, aes(x=L,y=m.l8,color="zp = 10"),linetype="dashed")+
+  
+  scale_color_manual(name=bquote("solid "~M[P_min]~"= 0.2; dashed"~M[P_min]~"= 0.4"),values=c("zp = 4"="black",
+                          "zp = 6"="blue","zp = 8"="orange","zp = 10"="red"))
+  
+fig2
+
+
+```
+
+### old version, not used now
 
 ```{r}
 # Predator length [m]
@@ -845,14 +934,15 @@ ggplot() +
   	x ="Age (d)",
 	  y = "Length (m)",
   	color = "Age at\nmaturation (y)",
-  	subtitle = "Black is baseline, coloured is scenario"
+  	subtitle = "Dashed line is baseline, solid line is scenario"
   ) + 
 	# scale_y_log10() +
-  facet_wrap( ~ sequence) +   
+  facet_wrap( ~ sequence, ncol = 5) +   
   theme_bw() + 
   theme(
     panel.grid.major = element_blank(), 
-    panel.grid.minor = element_blank()
+    panel.grid.minor = element_blank(),
+    axis.text=element_text(size=8)
   )
 ```
 
