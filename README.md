@@ -6,3 +6,5 @@ The study is published in a special issue of The Biological Bulletin journal and
 
 For all information please contact asta.audzijonyte@gamtc.lt 
 
+The study has been supported by the European Regional Development Fund (project No 01.2.2-LMT-K-718-02-0006) under grant agreement with the Research Council of Lithuania (LMTLT).
+
